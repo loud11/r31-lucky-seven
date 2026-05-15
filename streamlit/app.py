@@ -1,11 +1,11 @@
+# app.py
 import os
+import json
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 from dotenv import load_dotenv
 from openai import OpenAI
-import requests
-import json
 
 # =========================
 # 기본 설정
@@ -22,77 +22,129 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 # =========================
-# 나중에 실제 데이터로 교체할 부분
+# 유틸 함수
 # =========================
-def load_detection_data():
-    return pd.DataFrame({
-        "time": [
-            "2024-05-20 10:21:15",
-            "2024-05-20 10:20:31",
-            "2024-05-20 10:19:02",
-            "2024-05-20 10:18:45",
-            "2024-05-20 10:17:30",
-            "2024-05-20 10:16:10",
-        ],
-        "attack_type": [
-            "SQL Injection",
-            "XSS",
-            "Brute Force",
-            "SQL Injection",
-            "Port Scan",
-            "XSS",
-        ],
-        "source_ip": [
-            "192.168.1.23",
-            "192.168.1.45",
-            "192.168.1.99",
-            "192.168.1.23",
-            "192.168.1.77",
-            "192.168.1.45",
-        ],
-        "severity": [
-            "High",
-            "Medium",
-            "High",
-            "High",
-            "Low",
-            "Medium",
-        ]
-    })
+def shorten_text(text, max_chars=12000):
+    if text is None:
+        return ""
 
-# def load_detection_data():
-#     response = requests.get("http://127.0.0.1:8000/detections")
-#     return pd.DataFrame(response.json())
+    text = str(text)
+
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n\n...파일 내용이 길어 일부만 분석에 사용되었습니다."
+
+    return text
 
 
-def load_traffic_data():
-    return pd.DataFrame({
-        "time": ["10:00", "10:05", "10:10", "10:15", "10:20", "10:25", "10:30"],
-        "normal_traffic": [120, 150, 130, 180, 160, 210, 240],
-        "suspicious_traffic": [20, 35, 30, 60, 45, 70, 95],
-    })
-# def load_traffic_data():
-#     response = requests.get("http://127.0.0.1:8000/traffic")
-#     return pd.DataFrame(response.json())
+def normalize_uploaded_dataframe(file_df):
+    """
+    업로드된 CSV/JSON 컬럼명을 대시보드 표준 컬럼명으로 변환
+    표준 컬럼:
+    time, attack_type, source_ip, severity
+    """
 
-# =========================
-# 데이터 준비
-# =========================
-df = load_detection_data()
-traffic_df = load_traffic_data()
+    df = file_df.copy()
+    column_map = {}
 
-df["time"] = pd.to_datetime(df["time"])
+    for col in df.columns:
+        lower_col = str(col).lower().strip()
 
-total_detected = len(df)
+        if lower_col in ["time", "timestamp", "datetime", "date", "created_at"]:
+            column_map[col] = "time"
 
-attack_count_df = df["attack_type"].value_counts().reset_index()
-attack_count_df.columns = ["attack_type", "count"]
+        elif lower_col in [
+            "attack_type", "attack", "type", "event_type",
+            "threat", "alert", "category", "signature", "event", "message"
+        ]:
+            column_map[col] = "attack_type"
 
-time_trend_df = (
-    df.groupby(pd.Grouper(key="time", freq="5min"))
-    .size()
-    .reset_index(name="detections")
-)
+        elif lower_col in [
+            "source_ip", "src_ip", "source", "src",
+            "client_ip", "ip", "remote_addr", "remote_ip"
+        ]:
+            column_map[col] = "source_ip"
+
+        elif lower_col in ["severity", "risk", "level", "priority"]:
+            column_map[col] = "severity"
+
+    df = df.rename(columns=column_map)
+
+    if "time" not in df.columns:
+        df["time"] = pd.Timestamp.now()
+    else:
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+        df["time"] = df["time"].fillna(pd.Timestamp.now())
+
+    if "attack_type" not in df.columns:
+        df["attack_type"] = "Uploaded Event"
+
+    if "source_ip" not in df.columns:
+        df["source_ip"] = "Unknown"
+
+    if "severity" not in df.columns:
+        df["severity"] = "Medium"
+
+    df["attack_type"] = df["attack_type"].fillna("Unknown").astype(str)
+    df["source_ip"] = df["source_ip"].fillna("Unknown").astype(str)
+    df["severity"] = df["severity"].fillna("Medium").astype(str)
+
+    df["severity"] = df["severity"].str.capitalize()
+
+    return df[["time", "attack_type", "source_ip", "severity"]]
+
+
+def parse_uploaded_file(uploaded_file):
+    file_name = uploaded_file.name.lower()
+
+    try:
+        if file_name.endswith(".csv"):
+            uploaded_file.seek(0)
+            file_df = pd.read_csv(uploaded_file)
+
+            preview_text = file_df.head(20).to_string(index=False)
+            full_text = file_df.to_string(index=False)
+
+            dashboard_df = normalize_uploaded_dataframe(file_df)
+
+            return preview_text, full_text, dashboard_df
+
+        elif file_name.endswith(".json"):
+            uploaded_file.seek(0)
+            data = json.load(uploaded_file)
+
+            full_text = json.dumps(data, ensure_ascii=False, indent=2)
+            preview_text = full_text[:3000]
+
+            if isinstance(data, list):
+                file_df = pd.DataFrame(data)
+
+            elif isinstance(data, dict):
+                found_list = None
+
+                for key in ["logs", "events", "detections", "data", "records", "alerts"]:
+                    if key in data and isinstance(data[key], list):
+                        found_list = data[key]
+                        break
+
+                if found_list is not None:
+                    file_df = pd.DataFrame(found_list)
+                else:
+                    file_df = pd.DataFrame([data])
+
+            else:
+                file_df = pd.DataFrame()
+
+            dashboard_df = normalize_uploaded_dataframe(file_df)
+
+            return preview_text, full_text, dashboard_df
+
+        else:
+            st.error("현재는 JSON / CSV 파일만 업로드할 수 있습니다.")
+            return None, None, None
+
+    except Exception as e:
+        st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+        return None, None, None
 
 
 # =========================
@@ -198,205 +250,51 @@ st.markdown(
 
 
 # =========================
-# 상단 카드 3개
+# 세션 상태 초기화
 # =========================
-col1, col2, col3 = st.columns(3)
+if "uploaded_file_text" not in st.session_state:
+    st.session_state.uploaded_file_text = ""
 
-with col1:
-    with st.container(border=True):
-        st.subheader("위험 요약")
-        st.caption("Threat Summary")
+if "uploaded_file_name" not in st.session_state:
+    st.session_state.uploaded_file_name = ""
 
-        st.markdown(
-            f"""
-            <div class="summary-card-wrapper">
-                <div class="summary-number">{total_detected}</div>
-                <div class="summary-text">위험 탐지<br>(Detected)</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+if "dashboard_df" not in st.session_state:
+    st.session_state.dashboard_df = None
 
-with col2:
-    with st.container(border=True):
-        st.subheader("트래픽 통계")
-        st.caption("Traffic Statistics")
+if "file_analysis_result" not in st.session_state:
+    st.session_state.file_analysis_result = ""
 
-        fig_traffic = px.line(
-            traffic_df,
-            x="time",
-            y=["normal_traffic", "suspicious_traffic"],
-            markers=True,
-            labels={
-                "time": "Time",
-                "value": "Traffic",
-                "variable": "Type"
-            }
-        )
-
-        fig_traffic.update_layout(
-            height=280,
-            margin=dict(l=10, r=10, t=20, b=10),
-            legend=dict(
-                orientation="h",
-                y=-0.25,
-                x=0.5,
-                xanchor="center"
-            )
-        )
-
-        st.plotly_chart(fig_traffic, use_container_width=True)
-
-with col3:
-    with st.container(border=True):
-        st.subheader("주요 공격 유형")
-        st.caption("Top Attack Types")
-
-        fig_attack = px.pie(
-            attack_count_df,
-            names="attack_type",
-            values="count",
-            hole=0.55
-        )
-
-        fig_attack.update_layout(
-            height=280,
-            margin=dict(l=10, r=10, t=20, b=10),
-            legend=dict(
-                orientation="h",
-                y=-0.25,
-                x=0.5,
-                xanchor="center"
-            )
-        )
-
-        st.plotly_chart(fig_attack, use_container_width=True)
-
-
-# =========================
-# 시간별 탐지 추이
-# =========================
-with st.container(border=True):
-    st.subheader("시간별 탐지 추이")
-    st.caption("Detections Over Time")
-
-    fig_trend = px.line(
-        time_trend_df,
-        x="time",
-        y="detections",
-        markers=True,
-        labels={
-            "time": "Time",
-            "detections": "Detections"
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {
+            "role": "assistant",
+            "content": "안녕하세요. 파일을 업로드한 뒤 탐지 데이터나 그래프에 대해 질문해 주세요."
         }
-    )
+    ]
 
-    fig_trend.update_traces(fill="tozeroy")
-
-    fig_trend.update_layout(
-        height=330,
-        margin=dict(l=10, r=10, t=20, b=10)
-    )
-
-    st.plotly_chart(fig_trend, use_container_width=True)
-
-
-# =========================
-# 최근 탐지 내역
-# =========================
-with st.container(border=True):
-    st.subheader("최근 탐지 내역")
-    st.caption("Recent Detections")
-
-    recent_df = df.sort_values("time", ascending=False).copy()
-    recent_df["time"] = recent_df["time"].dt.strftime("%Y-%m-%d %H:%M:%S")
-
-    recent_df = recent_df.rename(columns={
-        "time": "시간",
-        "attack_type": "공격 유형",
-        "source_ip": "출발지 IP",
-        "severity": "위험도"
-    })
-
-    def severity_color(value):
-        if value == "High":
-            return "color: #e63946; font-weight: bold;"
-        if value == "Medium":
-            return "color: #f4a261; font-weight: bold;"
-        if value == "Low":
-            return "color: #2a9d8f; font-weight: bold;"
-        return ""
-
-    styled_recent_df = recent_df.style.map(
-        severity_color,
-        subset=["위험도"]
-    )
-
-    st.dataframe(
-        styled_recent_df,
-        use_container_width=True,
-        hide_index=True
-    )
-
-# =========================
-# 업로드 파일 분석 함수
-# =========================
-def parse_uploaded_file(uploaded_file):
-    file_name = uploaded_file.name.lower()
-
-    try:
-        if file_name.endswith(".json"):
-            uploaded_file.seek(0)
-            data = json.load(uploaded_file)
-            full_text = json.dumps(data, ensure_ascii=False, indent=2)
-            preview_text = full_text[:3000]
-            return preview_text, full_text
-        elif file_name.endswith(".csv"):
-            uploaded_file.seek(0)
-            file_df = pd.read_csv(uploaded_file)
-            preview_text = file_df.head(20).to_string(index=False)
-            full_text = file_df.to_string(index=False)
-            return preview_text, full_text
-
-    except Exception as e:
-        st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
-        return None, None
-    
-def shorten_text(text, max_chars=12000):
-    if text is None:
-        return ""
-
-    if len(text) > max_chars:
-        return text[:max_chars] + "\n\n...파일 내용이 길어 일부만 분석에 사용되었습니다."
-
-    return text
 
 # =========================
 # 파일 업로드 및 OpenAI 분석
 # =========================
 with st.container(border=True):
     st.subheader("파일 업로드 분석")
-    st.caption("Upload Security Logs JSON / CSV for AI Analysis")
+    st.caption("Upload Security Logs JSON / CSV for Dashboard and AI Analysis")
 
     uploaded_file = st.file_uploader(
         "분석할 파일을 업로드하세요.",
         type=["json", "csv"]
     )
 
-    if "uploaded_file_text" not in st.session_state:
-        st.session_state.uploaded_file_text = ""
-
-    if "uploaded_file_name" not in st.session_state:
-        st.session_state.uploaded_file_name = ""
-
     if uploaded_file is not None:
-        preview_text, full_text = parse_uploaded_file(uploaded_file)
+        preview_text, full_text, uploaded_df = parse_uploaded_file(uploaded_file)
 
-        if full_text:
+        if full_text is not None and uploaded_df is not None:
             st.session_state.uploaded_file_text = shorten_text(full_text)
             st.session_state.uploaded_file_name = uploaded_file.name
+            st.session_state.dashboard_df = uploaded_df
 
             st.success(f"파일 업로드 완료: {uploaded_file.name}")
+            st.info("아래 그래프와 최근 탐지 내역이 업로드 파일 기준으로 생성됩니다.")
 
             with st.expander("업로드 파일 미리보기"):
                 st.text(preview_text)
@@ -436,11 +334,181 @@ with st.container(border=True):
                         ]
                     )
 
-                    st.markdown("### AI 파일 분석 결과")
-                    st.write(response.output_text)
+                    st.session_state.file_analysis_result = response.output_text
 
                 except Exception as e:
-                    st.error(f"OpenAI API 호출 중 오류가 발생했습니다: {e}")
+                    st.session_state.file_analysis_result = f"OpenAI API 호출 중 오류가 발생했습니다: {e}"
+
+    if st.session_state.file_analysis_result:
+        st.markdown("### AI 파일 분석 결과")
+        st.write(st.session_state.file_analysis_result)
+
+
+# =========================
+# 파일 업로드 전 화면
+# =========================
+if st.session_state.dashboard_df is None:
+    st.warning("그래프와 최근 탐지 내역을 보려면 먼저 JSON 또는 CSV 파일을 업로드하세요.")
+    st.stop()
+
+
+# =========================
+# 업로드 파일 기반 대시보드 데이터 준비
+# =========================
+df = st.session_state.dashboard_df.copy()
+
+df["time"] = pd.to_datetime(df["time"], errors="coerce")
+df["time"] = df["time"].fillna(pd.Timestamp.now())
+
+total_detected = len(df)
+high_count = len(df[df["severity"] == "High"])
+medium_count = len(df[df["severity"] == "Medium"])
+low_count = len(df[df["severity"] == "Low"])
+
+severity_df = df["severity"].value_counts().reset_index()
+severity_df.columns = ["severity", "count"]
+
+source_ip_df = df["source_ip"].value_counts().head(10).reset_index()
+source_ip_df.columns = ["source_ip", "count"]
+
+attack_count_df = df["attack_type"].value_counts().reset_index()
+attack_count_df.columns = ["attack_type", "count"]
+
+st.caption(f"현재 데이터 기준: 업로드 파일 - {st.session_state.uploaded_file_name}")
+
+
+# =========================
+# 상단 카드 3개
+# =========================
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    with st.container(border=True):
+        st.subheader("위험 요약")
+        st.caption("Threat Summary")
+
+        st.markdown(
+            f"""
+            <div class="summary-card-wrapper">
+                <div class="summary-number">{total_detected}</div>
+                <div class="summary-text">
+                    전체 탐지 이벤트<br>
+                    High: {high_count} / Medium: {medium_count} / Low: {low_count}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+with col2:
+    with st.container(border=True):
+        st.subheader("위험도 분포")
+        st.caption("Severity Distribution")
+
+        fig_severity = px.bar(
+            severity_df,
+            x="severity",
+            y="count",
+            labels={
+                "severity": "Severity",
+                "count": "Count"
+            }
+        )
+
+        fig_severity.update_layout(
+            height=280,
+            margin=dict(l=10, r=10, t=20, b=10)
+        )
+
+        st.plotly_chart(fig_severity, use_container_width=True)
+
+with col3:
+    with st.container(border=True):
+        st.subheader("출발지 IP Top 10")
+        st.caption("Top Source IPs")
+
+        fig_source_ip = px.bar(
+            source_ip_df,
+            x="source_ip",
+            y="count",
+            labels={
+                "source_ip": "Source IP",
+                "count": "Count"
+            }
+        )
+
+        fig_source_ip.update_layout(
+            height=280,
+            margin=dict(l=10, r=10, t=20, b=10),
+            xaxis_tickangle=-35
+        )
+
+        st.plotly_chart(fig_source_ip, use_container_width=True)
+
+
+# =========================
+# 공격 유형 분포
+# =========================
+with st.container(border=True):
+    st.subheader("공격 유형 분포")
+    st.caption("Attack Type Distribution")
+
+    fig_attack = px.bar(
+        attack_count_df,
+        x="attack_type",
+        y="count",
+        labels={
+            "attack_type": "Attack Type",
+            "count": "Count"
+        }
+    )
+
+    fig_attack.update_layout(
+        height=330,
+        margin=dict(l=10, r=10, t=20, b=10),
+        xaxis_tickangle=-35
+    )
+
+    st.plotly_chart(fig_attack, use_container_width=True)
+
+
+# =========================
+# 최근 탐지 내역
+# =========================
+with st.container(border=True):
+    st.subheader("최근 탐지 내역")
+    st.caption("Recent Detections")
+
+    recent_df = df.sort_values("time", ascending=False).copy()
+    recent_df["time"] = recent_df["time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    recent_df = recent_df.rename(columns={
+        "time": "시간",
+        "attack_type": "공격 유형",
+        "source_ip": "출발지 IP",
+        "severity": "위험도"
+    })
+
+    def severity_color(value):
+        if value == "High":
+            return "color: #e63946; font-weight: bold;"
+        if value == "Medium":
+            return "color: #f4a261; font-weight: bold;"
+        if value == "Low":
+            return "color: #2a9d8f; font-weight: bold;"
+        return ""
+
+    styled_recent_df = recent_df.style.map(
+        severity_color,
+        subset=["위험도"]
+    )
+
+    st.dataframe(
+        styled_recent_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
 
 # =========================
 # OpenAI 챗봇
@@ -448,14 +516,6 @@ with st.container(border=True):
 with st.container(border=True):
     st.subheader("AI 기반 분석/설명")
     st.caption("OpenAI Security Assistant")
-
-    if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {
-                "role": "assistant",
-                "content": "안녕하세요. 탐지된 이상 징후에 대해 질문해 주세요. 예: 이 시간대에 SQL Injection이 왜 위험해?"
-            }
-        ]
 
     for message in st.session_state.messages:
         if message["role"] == "user":
@@ -477,7 +537,7 @@ with st.container(border=True):
                 unsafe_allow_html=True
             )
 
-    user_question = st.chat_input("이상 징후에 대해 질문하세요.")
+    user_question = st.chat_input("업로드 파일이나 이상 징후에 대해 질문하세요.")
 
     if user_question:
         st.session_state.messages.append({
@@ -487,11 +547,13 @@ with st.container(border=True):
 
         detection_context = df.to_string(index=False)
         attack_summary = attack_count_df.to_string(index=False)
-        trend_summary = time_trend_df.to_string(index=False)
+
+        uploaded_file_context = st.session_state.get("uploaded_file_text", "")
+        uploaded_file_name = st.session_state.get("uploaded_file_name", "")
 
         system_prompt = f"""
 너는 보안 관제 분석가이자 웹 취약점 분석 전문가다.
-사용자의 질문에 대해 아래 탐지 데이터를 바탕으로 한국어로 쉽게 설명해라.
+사용자의 질문에 대해 아래 탐지 데이터와 업로드 파일 내용을 바탕으로 한국어로 쉽게 설명해라.
 
 답변 규칙:
 1. 너무 길지 않게 핵심 위주로 설명한다.
@@ -499,15 +561,19 @@ with st.container(border=True):
 3. 데이터에 없는 내용은 추측이라고 말한다.
 4. 초보자도 이해할 수 있게 설명한다.
 5. 필요하면 WAF, 입력값 검증, 계정 잠금, IP 차단, 로그 분석 같은 대응책을 제안한다.
+6. 업로드 파일이 있으면 반드시 함께 참고한다.
 
-[최근 탐지 데이터]
+[현재 그래프 기준 탐지 데이터]
 {detection_context}
 
 [공격 유형 통계]
 {attack_summary}
 
-[시간별 탐지 추이]
-{trend_summary}
+[업로드 파일 이름]
+{uploaded_file_name}
+
+[업로드 파일 내용]
+{uploaded_file_context}
 """
 
         try:
