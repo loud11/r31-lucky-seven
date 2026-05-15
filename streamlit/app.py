@@ -351,6 +351,13 @@ def parse_uploaded_file(uploaded_file):
             full_text = json.dumps(data, ensure_ascii=False, indent=2)
             preview_text = full_text[:3000]
             return preview_text, full_text
+        elif file_name.endswith(".csv"):
+            uploaded_file.seek(0)
+            file_df = pd.read_csv(uploaded_file)
+            preview_text = file_df.head(20).to_string(index=False)
+            full_text = file_df.to_string(index=False)
+            return preview_text, full_text
+
     except Exception as e:
         st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
         return None, None
@@ -369,11 +376,11 @@ def shorten_text(text, max_chars=12000):
 # =========================
 with st.container(border=True):
     st.subheader("파일 업로드 분석")
-    st.caption("Upload Security Logs JSON")
+    st.caption("Upload Security Logs JSON / CSV for AI Analysis")
 
     uploaded_file = st.file_uploader(
         "분석할 파일을 업로드하세요.",
-        type=["json"]
+        type=["json", "csv"]
     )
 
     if "uploaded_file_text" not in st.session_state:
