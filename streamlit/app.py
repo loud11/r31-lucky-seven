@@ -5,6 +5,7 @@ import plotly.express as px
 from dotenv import load_dotenv
 from openai import OpenAI
 import requests
+import json
 
 # =========================
 # 기본 설정
@@ -337,6 +338,94 @@ with st.container(border=True):
         hide_index=True
     )
 
+# =========================
+# 업로드 파일 분석 함수
+# =========================
+def parse_uploaded_file(uploaded_file):
+    file_name = uploaded_file.name.lower()
+
+    try:
+        if file_name.endswith(".json"):
+            uploaded_file.seek(0)
+            data = json.load(uploaded_file)
+            full_text = json.dumps(data, ensure_ascii=False, indent=2)
+            preview_text = full_text[:3000]
+            return preview_text, full_text
+    except Exception as e:
+        st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+        return None, None
+    
+
+# =========================
+# 파일 업로드 및 OpenAI 분석
+# =========================
+with st.container(border=True):
+    st.subheader("파일 업로드 분석")
+    st.caption("Upload Security Logs JSON")
+
+    uploaded_file = st.file_uploader(
+        "분석할 파일을 업로드하세요.",
+        type=["json"]
+    )
+
+    if "uploaded_file_text" not in st.session_state:
+        st.session_state.uploaded_file_text = ""
+
+    if "uploaded_file_name" not in st.session_state:
+        st.session_state.uploaded_file_name = ""
+
+    if uploaded_file is not None:
+        preview_text, full_text = parse_uploaded_file(uploaded_file)
+
+        if full_text:
+            st.session_state.uploaded_file_text = shorten_text(full_text)
+            st.session_state.uploaded_file_name = uploaded_file.name
+
+            st.success(f"파일 업로드 완료: {uploaded_file.name}")
+
+            with st.expander("업로드 파일 미리보기"):
+                st.text(preview_text)
+
+            if st.button("OpenAI로 파일 분석하기"):
+                file_analysis_prompt = f"""
+너는 보안 로그 분석가다.
+아래 업로드된 파일 내용을 분석해서 한국어로 설명해라.
+
+분석 항목:
+1. 파일에서 보이는 주요 이상 징후
+2. 의심되는 공격 유형
+3. 위험도가 높은 이벤트
+4. 반복적으로 등장하는 IP, URL, 계정, 에러 패턴
+5. 보안 대응 방안
+6. 초보자도 이해할 수 있는 요약
+
+[파일 이름]
+{st.session_state.uploaded_file_name}
+
+[파일 내용]
+{st.session_state.uploaded_file_text}
+"""
+
+                try:
+                    response = client.responses.create(
+                        model="gpt-4.1-mini",
+                        input=[
+                            {
+                                "role": "system",
+                                "content": "너는 보안 관제 분석가이자 침해사고 분석 전문가다."
+                            },
+                            {
+                                "role": "user",
+                                "content": file_analysis_prompt
+                            }
+                        ]
+                    )
+
+                    st.markdown("### AI 파일 분석 결과")
+                    st.write(response.output_text)
+
+                except Exception as e:
+                    st.error(f"OpenAI API 호출 중 오류가 발생했습니다: {e}")
 
 # =========================
 # OpenAI 챗봇
