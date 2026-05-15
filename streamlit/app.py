@@ -1,5 +1,6 @@
 # app.py
 import os
+import re
 import json
 import pandas as pd
 import streamlit as st
@@ -37,133 +38,60 @@ def shorten_text(text, max_chars=12000):
     return text
 
 
-def classify_attack_type(path, method="", status=0, user_agent=""):
-    path = str(path).lower()
-    method = str(method).upper()
-    user_agent = str(user_agent).lower()
+def extract_json_array(text):
+    """
+    OpenAI 응답에서 JSON 배열만 추출
+    """
 
-    if "brute" in path or "username=" in path or "password=" in path:
-        return "Brute Force"
+    if not text:
+        return []
 
-    if (
-        "union" in path
-        or "select" in path
-        or "sql" in path
-        or "information_schema" in path
-        or "' or" in path
-        or '" or' in path
-        or "1=1" in path
-    ):
-        return "SQL Injection"
+    text = text.strip()
 
-    if (
-        "xss" in path
-        or "<script" in path
-        or "%3cscript" in path
-        or "alert(" in path
-        or "onerror=" in path
-    ):
-        return "XSS"
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
 
-    if "../" in path or "%2e%2e" in path or "etc/passwd" in path:
-        return "Path Traversal"
+    try:
+        text = text.replace("```json", "").replace("```", "").strip()
+        start = text.find("[")
+        end = text.rfind("]") + 1
 
-    if "cmd=" in path or "exec" in path or "system(" in path or "shell" in path:
-        return "Command Injection"
+        if start != -1 and end != -1:
+            return json.loads(text[start:end])
 
-    if "nikto" in user_agent or "sqlmap" in user_agent or "nmap" in user_agent:
-        return "Scanner / Automated Tool"
+    except Exception:
+        pass
 
-    if status >= 400:
-        return "Error / Suspicious Request"
-
-    if "login" in path:
-        return "Login Activity"
-
-    if method == "POST":
-        return "Form Submission"
-
-    return "Normal / Other"
+    return []
 
 
-def classify_severity(attack_type, status):
-    high_attacks = [
-        "Brute Force",
-        "SQL Injection",
-        "Command Injection",
-        "Path Traversal",
-        "Scanner / Automated Tool"
-    ]
+def normalize_path_pattern(path):
+    """
+    비슷한 URL 요청을 하나의 패턴으로 묶기
+    예:
+    /brute/?username=admin&password=1234
+    -> /brute/?username={value}&password={value}
+    """
 
-    medium_attacks = [
-        "XSS",
-        "Error / Suspicious Request",
-        "Login Activity"
-    ]
+    path = str(path)
 
-    if attack_type in high_attacks:
-        return "High"
+    path = re.sub(r"=([^&]+)", "={value}", path)
+    path = re.sub(r"/\d+", "/{id}", path)
+    path = re.sub(r"[A-Za-z0-9]{20,}", "{token}", path)
 
-    if attack_type in medium_attacks:
-        return "Medium"
-
-    if status >= 500:
-        return "High"
-
-    if status >= 400:
-        return "Medium"
-
-    return "Low"
+    return path
 
 
-def calculate_threat_score(attack_type, status, path):
-    score = 0
-    path = str(path).lower()
+def standardize_columns(file_df):
+    """
+    업로드된 CSV/JSON 컬럼명을 표준 컬럼명으로 변환
+    표준 컬럼:
+    time, source_ip, method, path, status, size, user_agent
+    """
 
-    if attack_type == "Brute Force":
-        score += 40
-    elif attack_type == "SQL Injection":
-        score += 45
-    elif attack_type == "Command Injection":
-        score += 50
-    elif attack_type == "Path Traversal":
-        score += 45
-    elif attack_type == "XSS":
-        score += 30
-    elif attack_type == "Scanner / Automated Tool":
-        score += 35
-    elif attack_type == "Login Activity":
-        score += 15
-
-    if status >= 500:
-        score += 25
-    elif status >= 400:
-        score += 15
-    elif status in [301, 302, 403]:
-        score += 8
-
-    suspicious_keywords = [
-        "password=",
-        "username=",
-        "union",
-        "select",
-        "<script",
-        "%3cscript",
-        "../",
-        "cmd=",
-        "etc/passwd"
-    ]
-
-    for keyword in suspicious_keywords:
-        if keyword in path:
-            score += 10
-
-    return min(score, 100)
-
-
-def normalize_uploaded_dataframe(file_df):
     df = file_df.copy()
-
     column_map = {}
 
     for col in df.columns:
@@ -172,7 +100,10 @@ def normalize_uploaded_dataframe(file_df):
         if lower_col in ["time", "timestamp", "datetime", "date", "created_at"]:
             column_map[col] = "time"
 
-        elif lower_col in ["ip", "source_ip", "src_ip", "source", "client_ip", "remote_addr", "remote_ip"]:
+        elif lower_col in [
+            "ip", "source_ip", "src_ip", "source",
+            "client_ip", "remote_addr", "remote_ip"
+        ]:
             column_map[col] = "source_ip"
 
         elif lower_col in ["method", "http_method"]:
@@ -232,31 +163,214 @@ def normalize_uploaded_dataframe(file_df):
     df["status"] = pd.to_numeric(df["status"], errors="coerce").fillna(0).astype(int)
     df["size"] = pd.to_numeric(df["size"], errors="coerce").fillna(0).astype(int)
 
-    df["attack_type"] = df.apply(
-        lambda row: classify_attack_type(
-            row["path"],
-            row["method"],
-            row["status"],
-            row["user_agent"]
-        ),
-        axis=1
-    )
-
-    df["severity"] = df.apply(
-        lambda row: classify_severity(row["attack_type"], row["status"]),
-        axis=1
-    )
-
-    df["threat_score"] = df.apply(
-        lambda row: calculate_threat_score(
-            row["attack_type"],
-            row["status"],
-            row["path"]
-        ),
-        axis=1
-    )
-
     return df[
+        [
+            "time",
+            "source_ip",
+            "method",
+            "path",
+            "status",
+            "size",
+            "user_agent"
+        ]
+    ]
+
+
+def analyze_logs_with_openai(df, batch_size=120):
+    """
+    빠른 버전:
+    전체 로그 row를 OpenAI에 보내지 않고,
+    method + path_pattern + status + user_agent_short 기준으로 묶어서
+    고유 요청 패턴만 OpenAI가 분석하게 함.
+    """
+
+    if client is None:
+        st.error("OPENAI_API_KEY가 설정되어 있지 않습니다. .env 파일을 확인해 주세요.")
+        return None
+
+    df = df.copy()
+
+    df["path_pattern"] = df["path"].apply(normalize_path_pattern)
+    df["user_agent_short"] = df["user_agent"].astype(str).str[:80]
+
+    pattern_df = (
+        df.groupby(["method", "path_pattern", "status", "user_agent_short"])
+        .agg(
+            request_count=("path", "count"),
+            sample_source_ip=("source_ip", "first"),
+            sample_path=("path", "first"),
+            avg_size=("size", "mean")
+        )
+        .reset_index()
+    )
+
+    pattern_df["pattern_id"] = pattern_df.index
+
+    result_rows = []
+    total_patterns = len(pattern_df)
+
+    st.info(f"전체 로그 {len(df)}개 중 고유 요청 패턴 {total_patterns}개만 OpenAI가 분석합니다.")
+
+    progress_bar = st.progress(0)
+    status_message = st.empty()
+
+    for start in range(0, total_patterns, batch_size):
+        end = min(start + batch_size, total_patterns)
+        batch_df = pattern_df.iloc[start:end].copy()
+
+        patterns = []
+
+        for _, row in batch_df.iterrows():
+            patterns.append({
+                "pattern_id": int(row["pattern_id"]),
+                "method": str(row["method"]),
+                "path_pattern": str(row["path_pattern"])[:300],
+                "sample_path": str(row["sample_path"])[:300],
+                "status": int(row["status"]),
+                "user_agent": str(row["user_agent_short"])[:80],
+                "request_count": int(row["request_count"]),
+                "sample_source_ip": str(row["sample_source_ip"]),
+                "avg_size": int(row["avg_size"])
+            })
+
+        prompt = f"""
+너는 웹 로그 보안 분석가다.
+아래 웹 요청 패턴들을 분석해서 각 pattern마다 보안 판단 결과를 만들어라.
+
+반드시 JSON 배열만 출력해라.
+설명 문장, 마크다운 코드블록은 쓰지 마라.
+
+각 pattern마다 판단할 항목:
+1. attack_type
+2. severity
+3. threat_score
+4. ai_reason
+5. recommended_action
+
+attack_type은 아래 중 하나를 선택해라:
+- Brute Force
+- SQL Injection
+- XSS
+- Path Traversal
+- Command Injection
+- Scanner / Automated Tool
+- Login Activity
+- Error / Suspicious Request
+- Suspicious Web Request
+- Normal / Other
+
+severity는 아래 중 하나를 선택해라:
+- High
+- Medium
+- Low
+
+threat_score는 0부터 100 사이 정수로 판단해라.
+0은 정상에 가깝고, 100은 매우 위험한 요청이다.
+
+판단할 때 반드시 고려해라:
+- path_pattern
+- sample_path
+- method
+- status
+- user_agent
+- request_count
+- sample_source_ip
+- avg_size
+
+출력 예시:
+[
+  {{
+    "pattern_id": 0,
+    "attack_type": "Brute Force",
+    "severity": "High",
+    "threat_score": 88,
+    "ai_reason": "로그인 관련 경로에 username과 password 파라미터가 포함되어 있고 반복 요청 수가 높아 Brute Force 가능성이 큽니다.",
+    "recommended_action": "해당 IP의 로그인 요청 빈도를 제한하고 CAPTCHA, 계정 잠금, MFA를 적용하세요."
+  }}
+]
+
+분석할 요청 패턴:
+{json.dumps(patterns, ensure_ascii=False, indent=2)}
+"""
+
+        try:
+            response = client.responses.create(
+                model="gpt-4.1-mini",
+                input=[
+                    {
+                        "role": "system",
+                        "content": "너는 웹 로그 기반 보안 이벤트 분류 전문가다."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            )
+
+            parsed = extract_json_array(response.output_text)
+
+            if not parsed:
+                st.warning(f"{start + 1}~{end}번째 패턴의 OpenAI 응답을 JSON으로 읽지 못했습니다.")
+            else:
+                result_rows.extend(parsed)
+
+        except Exception as e:
+            st.error(f"OpenAI 로그 분석 중 오류 발생: {e}")
+
+        progress_bar.progress(end / total_patterns)
+        status_message.info(f"OpenAI가 요청 패턴을 분석 중입니다: {end}/{total_patterns}")
+
+    progress_bar.empty()
+    status_message.empty()
+
+    result_df = pd.DataFrame(result_rows)
+
+    if result_df.empty:
+        st.error("OpenAI 분석 결과가 비어 있습니다.")
+        return None
+
+    result_df["pattern_id"] = pd.to_numeric(result_df["pattern_id"], errors="coerce")
+    result_df = result_df.dropna(subset=["pattern_id"])
+    result_df["pattern_id"] = result_df["pattern_id"].astype(int)
+
+    pattern_analyzed_df = pattern_df.merge(
+        result_df,
+        on="pattern_id",
+        how="left"
+    )
+
+    merged_df = df.merge(
+        pattern_analyzed_df[
+            [
+                "method",
+                "path_pattern",
+                "status",
+                "user_agent_short",
+                "attack_type",
+                "severity",
+                "threat_score",
+                "ai_reason",
+                "recommended_action"
+            ]
+        ],
+        on=["method", "path_pattern", "status", "user_agent_short"],
+        how="left"
+    )
+
+    merged_df["attack_type"] = merged_df["attack_type"].fillna("Unknown")
+    merged_df["severity"] = merged_df["severity"].fillna("Medium")
+    merged_df["threat_score"] = pd.to_numeric(
+        merged_df["threat_score"],
+        errors="coerce"
+    ).fillna(50).astype(int)
+
+    merged_df["ai_reason"] = merged_df["ai_reason"].fillna("OpenAI 분석 사유가 없습니다.")
+    merged_df["recommended_action"] = merged_df["recommended_action"].fillna("추가 로그 확인이 필요합니다.")
+
+    merged_df = merged_df.drop(columns=["path_pattern", "user_agent_short"])
+
+    return merged_df[
         [
             "time",
             "source_ip",
@@ -267,7 +381,9 @@ def normalize_uploaded_dataframe(file_df):
             "user_agent",
             "attack_type",
             "severity",
-            "threat_score"
+            "threat_score",
+            "ai_reason",
+            "recommended_action"
         ]
     ]
 
@@ -278,14 +394,15 @@ def parse_uploaded_file(uploaded_file):
     try:
         if file_name.endswith(".csv"):
             uploaded_file.seek(0)
-            file_df = pd.read_csv(uploaded_file)
+            raw_df = pd.read_csv(uploaded_file)
 
-            preview_text = file_df.head(20).to_string(index=False)
-            full_text = file_df.to_string(index=False)
+            preview_text = raw_df.head(20).to_string(index=False)
+            full_text = raw_df.to_string(index=False)
 
-            dashboard_df = normalize_uploaded_dataframe(file_df)
+            base_df = standardize_columns(raw_df)
+            analyzed_df = analyze_logs_with_openai(base_df, batch_size=120)
 
-            return preview_text, full_text, dashboard_df
+            return preview_text, full_text, analyzed_df
 
         elif file_name.endswith(".json"):
             uploaded_file.seek(0)
@@ -295,7 +412,7 @@ def parse_uploaded_file(uploaded_file):
             preview_text = full_text[:3000]
 
             if isinstance(data, list):
-                file_df = pd.DataFrame(data)
+                raw_df = pd.DataFrame(data)
 
             elif isinstance(data, dict):
                 found_list = None
@@ -306,19 +423,20 @@ def parse_uploaded_file(uploaded_file):
                         break
 
                 if found_list is not None:
-                    file_df = pd.DataFrame(found_list)
+                    raw_df = pd.DataFrame(found_list)
                 else:
-                    file_df = pd.DataFrame([data])
+                    raw_df = pd.DataFrame([data])
 
             else:
-                file_df = pd.DataFrame()
+                raw_df = pd.DataFrame()
 
-            dashboard_df = normalize_uploaded_dataframe(file_df)
+            base_df = standardize_columns(raw_df)
+            analyzed_df = analyze_logs_with_openai(base_df, batch_size=120)
 
-            return preview_text, full_text, dashboard_df
+            return preview_text, full_text, analyzed_df
 
         else:
-            st.error("현재는 JSON / CSV 파일만 업로드할 수 있습니다.")
+            st.error("현재는 CSV / JSON 파일만 업로드할 수 있습니다.")
             return None, None, None
 
     except Exception as e:
@@ -440,7 +558,7 @@ st.markdown(
 )
 
 st.markdown(
-    '<div class="sub-title">Web Log Security Analytics Dashboard with OpenAI Chatbot</div>',
+    '<div class="sub-title">Fast Web Log Security Analytics Dashboard with OpenAI Pattern-Based Classification</div>',
     unsafe_allow_html=True
 )
 
@@ -460,6 +578,9 @@ if "dashboard_df" not in st.session_state:
 if "file_analysis_result" not in st.session_state:
     st.session_state.file_analysis_result = ""
 
+if "last_file_signature" not in st.session_state:
+    st.session_state.last_file_signature = ""
+
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {
@@ -474,7 +595,7 @@ if "messages" not in st.session_state:
 # =========================
 with st.container(border=True):
     st.subheader("파일 업로드 분석")
-    st.caption("Upload Web Security Logs CSV / JSON for Dashboard and AI Analysis")
+    st.caption("Upload Web Security Logs CSV / JSON for Fast OpenAI Pattern Analysis")
 
     uploaded_file = st.file_uploader(
         "분석할 웹 로그 파일을 업로드하세요.",
@@ -482,67 +603,96 @@ with st.container(border=True):
     )
 
     if uploaded_file is not None:
-        preview_text, full_text, uploaded_df = parse_uploaded_file(uploaded_file)
+        file_signature = f"{uploaded_file.name}_{uploaded_file.size}"
 
-        if full_text is not None and uploaded_df is not None:
-            st.session_state.uploaded_file_text = shorten_text(full_text)
-            st.session_state.uploaded_file_name = uploaded_file.name
-            st.session_state.dashboard_df = uploaded_df
+        if st.session_state.last_file_signature != file_signature:
+            st.session_state.file_analysis_result = ""
+            st.session_state.dashboard_df = None
 
-            st.success(f"파일 업로드 완료: {uploaded_file.name}")
-            st.info("아래 그래프와 최근 탐지 내역이 업로드 파일 기준으로 생성됩니다.")
+            preview_text, full_text, analyzed_df = parse_uploaded_file(uploaded_file)
 
-            with st.expander("업로드 파일 미리보기"):
-                st.text(preview_text)
+            if full_text is not None and analyzed_df is not None:
+                st.session_state.uploaded_file_text = shorten_text(full_text)
+                st.session_state.uploaded_file_name = uploaded_file.name
+                st.session_state.dashboard_df = analyzed_df
+                st.session_state.last_file_signature = file_signature
 
-            if st.button("OpenAI로 파일 분석하기"):
-                if client is None:
-                    st.session_state.file_analysis_result = "OPENAI_API_KEY가 설정되어 있지 않습니다."
-                else:
-                    file_analysis_prompt = f"""
+                st.success(f"파일 업로드 및 OpenAI 패턴 분석 완료: {uploaded_file.name}")
+                st.info("아래 그래프와 최근 탐지 내역은 OpenAI가 판단한 보안 분석 결과를 기준으로 생성됩니다.")
+
+                with st.expander("업로드 파일 미리보기"):
+                    st.text(preview_text)
+
+        else:
+            st.success(f"이미 분석된 파일입니다: {uploaded_file.name}")
+            st.info("아래 그래프는 기존 OpenAI 분석 결과를 기준으로 표시됩니다.")
+
+    if st.session_state.dashboard_df is not None:
+        if st.button("OpenAI로 전체 파일 요약 분석하기"):
+            if client is None:
+                st.session_state.file_analysis_result = "OPENAI_API_KEY가 설정되어 있지 않습니다."
+            else:
+                df_for_summary = st.session_state.dashboard_df.copy()
+
+                summary_context = df_for_summary[
+                    [
+                        "source_ip",
+                        "method",
+                        "path",
+                        "status",
+                        "user_agent",
+                        "attack_type",
+                        "severity",
+                        "threat_score",
+                        "ai_reason",
+                        "recommended_action"
+                    ]
+                ].head(150).to_string(index=False)
+
+                file_analysis_prompt = f"""
 너는 웹 로그 보안 분석가다.
-아래 업로드된 웹 로그 내용을 분석해서 한국어로 설명해라.
+아래 OpenAI가 패턴 단위로 분류한 웹 로그 분석 결과를 종합해서 한국어로 설명해라.
 
 분석 항목:
 1. 전체 로그 요약
-2. 의심되는 공격 유형
-3. Brute Force, SQL Injection, XSS, Path Traversal 가능성
-4. 가장 많이 요청한 IP
-5. 많이 요청된 URL Path
-6. HTTP Status Code 관점의 이상 징후
-7. User-Agent 관점의 자동화 도구 가능성
-8. 보안 대응 방안
+2. 주요 공격 유형
+3. 위험도가 높은 IP
+4. 위험도가 높은 Path
+5. Status Code 관점의 이상 징후
+6. User-Agent 관점의 자동화 도구 가능성
+7. 위협 점수가 높은 이벤트 특징
+8. 우선 대응해야 할 보안 조치
 9. 초보자도 이해할 수 있는 요약
 
 [파일 이름]
 {st.session_state.uploaded_file_name}
 
-[파일 내용]
-{st.session_state.uploaded_file_text}
+[OpenAI 분석 결과 일부]
+{summary_context}
 """
 
-                    try:
-                        response = client.responses.create(
-                            model="gpt-4.1-mini",
-                            input=[
-                                {
-                                    "role": "system",
-                                    "content": "너는 웹 로그 분석과 침해사고 분석에 능숙한 보안 관제 분석가다."
-                                },
-                                {
-                                    "role": "user",
-                                    "content": file_analysis_prompt
-                                }
-                            ]
-                        )
+                try:
+                    response = client.responses.create(
+                        model="gpt-4.1-mini",
+                        input=[
+                            {
+                                "role": "system",
+                                "content": "너는 웹 로그 분석과 침해사고 분석에 능숙한 보안 관제 분석가다."
+                            },
+                            {
+                                "role": "user",
+                                "content": file_analysis_prompt
+                            }
+                        ]
+                    )
 
-                        st.session_state.file_analysis_result = response.output_text
+                    st.session_state.file_analysis_result = response.output_text
 
-                    except Exception as e:
-                        st.session_state.file_analysis_result = f"OpenAI API 호출 중 오류가 발생했습니다: {e}"
+                except Exception as e:
+                    st.session_state.file_analysis_result = f"OpenAI API 호출 중 오류가 발생했습니다: {e}"
 
     if st.session_state.file_analysis_result:
-        st.markdown("### AI 파일 분석 결과")
+        st.markdown("### AI 전체 파일 분석 결과")
         st.write(st.session_state.file_analysis_result)
 
 
@@ -593,6 +743,15 @@ suspicious_df = df[df["severity"].isin(["High", "Medium"])].copy()
 suspicious_path_df = suspicious_df["path"].value_counts().head(10).reset_index()
 suspicious_path_df.columns = ["path", "count"]
 
+high_risk_ip_df = (
+    df[df["severity"] == "High"]
+    .groupby("source_ip")
+    .size()
+    .reset_index(name="high_risk_count")
+    .sort_values("high_risk_count", ascending=False)
+    .head(10)
+)
+
 st.caption(f"현재 데이터 기준: 업로드 파일 - {st.session_state.uploaded_file_name}")
 
 
@@ -624,8 +783,8 @@ with col1:
 
 with col2:
     with st.container(border=True):
-        st.subheader("공격 유형 분포")
-        st.caption("Attack Type Distribution")
+        st.subheader("OpenAI 공격 유형 분포")
+        st.caption("Attack Types Classified by OpenAI")
 
         fig_attack = px.bar(
             attack_count_df,
@@ -723,8 +882,8 @@ col6, col7 = st.columns(2)
 
 with col6:
     with st.container(border=True):
-        st.subheader("위험도 분포")
-        st.caption("Severity Distribution")
+        st.subheader("OpenAI 위험도 분포")
+        st.caption("Severity Classified by OpenAI")
 
         fig_severity = px.bar(
             severity_df,
@@ -745,8 +904,8 @@ with col6:
 
 with col7:
     with st.container(border=True):
-        st.subheader("위협 점수 분포")
-        st.caption("Threat Score Distribution")
+        st.subheader("OpenAI 위협 점수 분포")
+        st.caption("Threat Scores Assigned by OpenAI")
 
         fig_score = px.histogram(
             df,
@@ -763,6 +922,35 @@ with col7:
         )
 
         st.plotly_chart(fig_score, use_container_width=True)
+
+
+# =========================
+# 고위험 IP 분석
+# =========================
+with st.container(border=True):
+    st.subheader("고위험 요청 IP Top 10")
+    st.caption("Top IPs with High Severity Requests")
+
+    if high_risk_ip_df.empty:
+        st.info("OpenAI가 High로 분류한 요청이 없습니다.")
+    else:
+        fig_high_ip = px.bar(
+            high_risk_ip_df,
+            x="source_ip",
+            y="high_risk_count",
+            labels={
+                "source_ip": "Source IP",
+                "high_risk_count": "High Risk Requests"
+            }
+        )
+
+        fig_high_ip.update_layout(
+            height=350,
+            margin=dict(l=10, r=10, t=20, b=10),
+            xaxis_tickangle=-30
+        )
+
+        st.plotly_chart(fig_high_ip, use_container_width=True)
 
 
 # =========================
@@ -792,11 +980,11 @@ with st.container(border=True):
 
 
 with st.container(border=True):
-    st.subheader("의심 요청 Path Top 10")
-    st.caption("Top Suspicious URL Paths")
+    st.subheader("OpenAI 기준 의심 요청 Path Top 10")
+    st.caption("Suspicious Paths Based on OpenAI Severity")
 
     if suspicious_path_df.empty:
-        st.info("의심 요청으로 분류된 Path가 없습니다.")
+        st.info("OpenAI가 의심 요청으로 분류한 Path가 없습니다.")
     else:
         fig_suspicious_path = px.bar(
             suspicious_path_df,
@@ -848,7 +1036,7 @@ with st.container(border=True):
 # =========================
 with st.container(border=True):
     st.subheader("최근 탐지 내역")
-    st.caption("Recent Security Detections")
+    st.caption("Recent Security Detections with OpenAI Reasoning")
 
     recent_df = df.sort_values("time", ascending=False).copy()
     recent_df["time"] = recent_df["time"].dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -861,9 +1049,11 @@ with st.container(border=True):
         "status": "Status",
         "size": "Size",
         "user_agent": "User-Agent",
-        "attack_type": "공격 유형",
-        "severity": "위험도",
-        "threat_score": "위협 점수"
+        "attack_type": "OpenAI 공격 유형",
+        "severity": "OpenAI 위험도",
+        "threat_score": "OpenAI 위협 점수",
+        "ai_reason": "OpenAI 판단 근거",
+        "recommended_action": "권장 대응"
     })
 
     display_columns = [
@@ -872,9 +1062,11 @@ with st.container(border=True):
         "Method",
         "Path",
         "Status",
-        "공격 유형",
-        "위험도",
-        "위협 점수",
+        "OpenAI 공격 유형",
+        "OpenAI 위험도",
+        "OpenAI 위협 점수",
+        "OpenAI 판단 근거",
+        "권장 대응",
         "User-Agent"
     ]
 
@@ -882,7 +1074,7 @@ with st.container(border=True):
 
     styled_recent_df = recent_df.style.map(
         severity_color,
-        subset=["위험도"]
+        subset=["OpenAI 위험도"]
     )
 
     st.dataframe(
@@ -933,12 +1125,9 @@ with st.container(border=True):
         status_summary = status_df.to_string(index=False)
         path_summary = top_path_df.to_string(index=False)
 
-        uploaded_file_context = st.session_state.get("uploaded_file_text", "")
-        uploaded_file_name = st.session_state.get("uploaded_file_name", "")
-
         system_prompt = f"""
 너는 웹 로그 보안 분석가이자 침해사고 분석 전문가다.
-사용자의 질문에 대해 아래 웹 로그 분석 데이터와 업로드 파일 내용을 바탕으로 한국어로 쉽게 설명해라.
+사용자의 질문에 대해 아래 OpenAI 분석 결과와 웹 로그 데이터를 바탕으로 한국어로 쉽게 설명해라.
 
 답변 규칙:
 1. 핵심 위주로 답변한다.
@@ -946,11 +1135,12 @@ with st.container(border=True):
 3. 데이터에 없는 내용은 추측이라고 말한다.
 4. 초보자도 이해할 수 있게 설명한다.
 5. 웹 로그 기준으로 IP, Path, Status, Method, User-Agent를 함께 참고한다.
+6. attack_type, severity, threat_score는 OpenAI가 요청 패턴 단위로 판단한 결과다.
 
-[최근 탐지 데이터 일부]
+[최근 OpenAI 분석 결과 일부]
 {detection_context}
 
-[공격 유형 통계]
+[OpenAI 공격 유형 통계]
 {attack_summary}
 
 [출발지 IP 통계]
@@ -962,11 +1152,8 @@ with st.container(border=True):
 [요청 Path 통계]
 {path_summary}
 
-[업로드 파일 이름]
-{uploaded_file_name}
-
-[업로드 파일 내용 일부]
-{uploaded_file_context}
+[파일 이름]
+{st.session_state.uploaded_file_name}
 """
 
         if client is None:
