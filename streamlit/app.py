@@ -355,6 +355,14 @@ def parse_uploaded_file(uploaded_file):
         st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
         return None, None
     
+def shorten_text(text, max_chars=12000):
+    if text is None:
+        return ""
+
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n\n...파일 내용이 길어 일부만 분석에 사용되었습니다."
+
+    return text
 
 # =========================
 # 파일 업로드 및 OpenAI 분석
