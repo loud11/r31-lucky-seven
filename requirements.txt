@@ -4,3 +4,5 @@ plotly
 openai
 scapy
 streamlit-autorefresh
+python-dotenv
+requests
